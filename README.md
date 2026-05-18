@@ -74,4 +74,4 @@ You can use `tehreem-fashion-ecommerce/.env.example` as a template.
 ## License
 
 All rights reserved © Tehreem FashionScape
-
+ 
