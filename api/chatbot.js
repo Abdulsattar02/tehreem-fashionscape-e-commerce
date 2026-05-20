@@ -11,6 +11,24 @@ async function openaiFetch(url, options) {
   return fetchFn(url, options);
 }
 
+function withTimeout(promise, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`OpenRouter request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise
+      .then((v) => {
+        clearTimeout(timer);
+        resolve(v);
+      })
+      .catch((e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+  });
+}
+
 function jsonResponse(body, init = {}) {
   const headers = {
     "Content-Type": "application/json; charset=utf-8",
@@ -79,7 +97,9 @@ module.exports = async function handler(req) {
     let body;
     try {
       body = await req.json();
-    } catch {
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("CHATBOT ERROR:", error);
       return jsonResponse(
         { error: "Malformed request body. JSON is required." },
         { status: 400 },
@@ -94,6 +114,9 @@ module.exports = async function handler(req) {
     }
 
     const { messages, temperature } = body || {};
+
+    // Defensive: default temperature from required spec
+    const tempToUse = typeof temperature === "number" ? temperature : 0.7;
 
     const safeMessages = Array.isArray(messages) ? messages : [];
     if (!safeMessages.length) {
@@ -119,8 +142,6 @@ module.exports = async function handler(req) {
       ? [{ role: "system", content: systemPrompt }, ...safeMessages]
       : [{ role: "system", content: systemPrompt }];
 
-    const tempToUse = typeof temperature === "number" ? temperature : 0.7;
-
     const payload = {
       model: modelToUse,
       messages: finalMessages,
@@ -129,33 +150,49 @@ module.exports = async function handler(req) {
 
     const completionsUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
 
+    const timeoutMs = 15000;
+
     let response;
     try {
-      response = await openaiFetch(completionsUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          // Preserve OpenRouter headers exactly (from backend/server.js)
-          "HTTP-Referer": "http://127.0.0.1:3000",
-          "X-Title": "Tehreem FashionScape AI Assistant",
-        },
-        body: JSON.stringify(payload),
-      });
+      response = await withTimeout(
+        openaiFetch(completionsUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+            "HTTP-Referer": "https://tehreem-fashionscape-e-commerce.vercel.app",
+            "X-Title": "Tehreem FashionScape AI Assistant",
+          },
+          body: JSON.stringify(payload),
+        }),
+        timeoutMs,
+      );
     } catch (networkErr) {
+      // eslint-disable-next-line no-console
+      console.error("CHATBOT ERROR:", networkErr);
+      const message =
+        String(networkErr?.message || networkErr || "").toLowerCase() || "";
+
+      const isTimeout = message.includes("timed out") || message.includes("timeout");
+
       return jsonResponse(
         {
-          error: "Network error while contacting OpenAI.",
+          error: isTimeout
+            ? "OpenRouter request timed out."
+            : "Network error while contacting OpenAI.",
+          fallback: "I’m temporarily unavailable right now. Please try again shortly.",
           details: { message: networkErr?.message || String(networkErr) },
         },
-        { status: 502 },
+        { status: isTimeout ? 504 : 502 },
       );
     }
 
     let data;
     try {
       data = await response.json();
-    } catch {
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("CHATBOT ERROR:", error);
       return jsonResponse(
         {
           error: "Invalid response from OpenAI (not JSON).",
@@ -203,9 +240,16 @@ module.exports = async function handler(req) {
 
     const content = data?.choices?.[0]?.message?.content;
     if (typeof content !== "string" || !content.trim()) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[chatbot-backend][${requestId}] Missing content in OpenRouter response`,
+        data,
+      );
       return jsonResponse(
         {
-          error: "OpenAI returned an unexpected response format.",
+          error: "OpenRouter returned an unexpected response format.",
+          fallback:
+            "I’m temporarily unavailable right now. Please try again shortly.",
           details: data,
         },
         { status: 502 },

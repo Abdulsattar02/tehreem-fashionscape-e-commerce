@@ -143,12 +143,8 @@
   };
 
   const askOpenAI = async (userText) => {
-    // Production safety: frontend should call backend proxy.
-    // Here we use a proxy-style endpoint by default: /api/chatbot.
-    // If not available, show a graceful error.
-
     const payload = {
-      model: MODEL,
+      model: typeof MODEL !== "undefined" ? MODEL : undefined,
       messages: [
         { role: "system", content: buildAssistantSystemPrompt() },
         { role: "user", content: userText },
@@ -156,42 +152,45 @@
       temperature: 0.4,
     };
 
-    // Prefer backend proxy (prevents key exposure).
-    // Endpoint expected: POST /api/chatbot with { messages, model } or similar.
-    // We'll keep it simple and forward payload.
+    const fallback =
+      "I’m temporarily unavailable right now. Please try again shortly.";
+
+    // Prevent hangs forever: timeout the proxy request.
+    const timeoutMs = 15000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
       const proxyRes = await fetch("/api/chatbot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
-      if (proxyRes.ok) {
-        const proxyData = await proxyRes.json();
-        const content =
-          proxyData?.choices?.[0]?.message?.content || proxyData?.content;
-        if (typeof content === "string" && content.trim()) return content;
-      } else {
-        // Try to surface readable backend error (do not change UI styling)
+      if (!proxyRes.ok) {
         const proxyData = await proxyRes.json().catch(() => ({}));
         const backendError =
           proxyData?.error || proxyData?.details?.error?.message;
-        if (typeof backendError === "string" && backendError.trim()) {
-          return backendError;
-        }
+        throw new Error(
+          typeof backendError === "string" && backendError.trim()
+            ? backendError
+            : `Assistant request failed: ${proxyRes.status}`,
+        );
       }
 
-      // If proxy fails, do NOT try to call OpenAI directly from frontend.
-      // Show fallback message.
-      return "I couldn’t reach the assistant right now. Please try again in a moment.";
-    } catch {
-      // Fallback to friendly message
-      return "I couldn’t reach the assistant right now. Please try again in a moment.";
-    }
+      const proxyData = await proxyRes.json();
+      const content = proxyData?.choices?.[0]?.message?.content;
 
-    // Note: Direct OpenAI frontend call is intentionally avoided.
-    // Required structure example (for reference only):
-    // fetch("https://api.openai.com/v1/chat/completions")
+      if (typeof content === "string" && content.trim()) return content;
+
+      return fallback;
+    } catch (err) {
+      // Ensure the typing animation doesn’t get stuck.
+      return fallback;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   };
 
   const openChat = () => {
