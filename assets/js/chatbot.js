@@ -144,7 +144,6 @@
 
   const askOpenAI = async (userText) => {
     const payload = {
-      model: typeof MODEL !== "undefined" ? MODEL : undefined,
       messages: [
         { role: "system", content: buildAssistantSystemPrompt() },
         { role: "user", content: userText },
@@ -161,6 +160,7 @@
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      console.log("[frontend] Sending chatbot request");
       const proxyRes = await fetch("/api/chatbot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -169,24 +169,35 @@
       });
 
       if (!proxyRes.ok) {
+        console.error(
+          "[frontend] Chatbot endpoint returned error:",
+          proxyRes.status,
+        );
         const proxyData = await proxyRes.json().catch(() => ({}));
         const backendError =
           proxyData?.error || proxyData?.details?.error?.message;
         throw new Error(
           typeof backendError === "string" && backendError.trim()
             ? backendError
-            : `Assistant request failed: ${proxyRes.status}`,
+            : `Request failed: ${proxyRes.status}`,
         );
       }
 
+      console.log("[frontend] Chatbot response received");
       const proxyData = await proxyRes.json();
-      const content = proxyData?.choices?.[0]?.message?.content;
 
-      if (typeof content === "string" && content.trim()) return content;
+      // Backend returns { reply: "..." } format
+      const content = proxyData?.reply;
 
+      if (typeof content === "string" && content.trim()) {
+        console.log("[frontend] Got valid reply:", content.slice(0, 50));
+        return content;
+      }
+
+      console.warn("[frontend] No valid reply in response", proxyData);
       return fallback;
     } catch (err) {
-      // Ensure the typing animation doesn’t get stuck.
+      console.error("[frontend] Chatbot error:", err?.message || err);
       return fallback;
     } finally {
       clearTimeout(timeoutId);

@@ -30,24 +30,7 @@ function jsonReply(body, status = 200) {
   });
 }
 
-function withTimeout(ms, signal) {
-  return new Promise((_, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`timeout-after-${ms}ms`));
-    }, ms);
-
-    if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(new Error("aborted"));
-        },
-        { once: true },
-      );
-    }
-  });
-}
+// Removed: withTimeout() - using simple AbortController instead
 
 async function readJson(req) {
   try {
@@ -60,10 +43,13 @@ async function readJson(req) {
 async function handler(req) {
   const requestStartedAt = Date.now();
   const requestId = Math.random().toString(16).slice(2);
+  let timeoutId = null;
 
   try {
-    console.log(`[chatbot][${requestId}] request received method=${req?.method}`);
+    console.log("STEP 1: Request received");
+    console.log(`[chatbot][${requestId}] method=${req?.method}`);
 
+    // Handle CORS preflight
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -75,48 +61,63 @@ async function handler(req) {
       });
     }
 
+    // Only POST allowed
     if (req.method !== "POST") {
+      console.log(`[chatbot][${requestId}] Not POST, returning 405`);
       return jsonReply({ reply: FALLBACK_REPLY }, 405);
     }
 
+    // Validate environment variables
+    console.log("STEP 2: Validating environment");
     const envOpenRouterKey = process.env.OPENAI_API_KEY;
     const envBaseUrl = process.env.OPENAI_BASE_URL;
     const envModel = process.env.MODEL || "openai/gpt-4o-mini";
 
     if (!envOpenRouterKey || !envBaseUrl) {
       console.error(
-        `[chatbot][${requestId}] Missing env OPENAI_API_KEY or OPENAI_BASE_URL`,
+        `[chatbot][${requestId}] Missing OPENAI_API_KEY or OPENAI_BASE_URL`,
       );
       return jsonReply({ reply: FALLBACK_REPLY }, 500);
     }
 
+    // Parse request body
+    console.log("STEP 3: Parsing request body");
     const parsedBody = await readJson(req);
     if (!parsedBody || typeof parsedBody !== "object") {
-      console.error(`[chatbot][${requestId}] Missing/invalid JSON body`);
+      console.error(`[chatbot][${requestId}] Invalid JSON body`);
       return jsonReply({ reply: FALLBACK_REPLY }, 400);
     }
 
     const { messages, temperature } = parsedBody;
     const safeMessages = Array.isArray(messages) ? messages : [];
     if (!safeMessages.length) {
-      console.error(`[chatbot][${requestId}] Missing messages array`);
+      console.error(`[chatbot][${requestId}] No messages provided`);
       return jsonReply({ reply: FALLBACK_REPLY }, 400);
     }
 
     const tempToUse = typeof temperature === "number" ? temperature : 0.7;
 
+    // Prepare OpenRouter request
+    console.log("STEP 4: Preparing OpenRouter request");
     const finalMessages = [
       { role: "system", content: SYSTEM_PROMPT },
       ...safeMessages,
     ];
 
     const completionsUrl = `${envBaseUrl.replace(/\/$/, "")}/chat/completions`;
+    console.log(`[chatbot][${requestId}] URL: ${completionsUrl}`);
 
+    // Simple AbortController timeout (no Promise.race)
+    console.log("STEP 5: Starting fetch with 10s timeout");
     const controller = new AbortController();
     const timeoutMs = 10000;
-    const timeoutPromise = withTimeout(timeoutMs, controller.signal);
+    timeoutId = setTimeout(() => {
+      console.log(`[chatbot][${requestId}] Aborting fetch after ${timeoutMs}ms`);
+      controller.abort();
+    }, timeoutMs);
 
-    const openRouterReq = fetch(completionsUrl, {
+    // Single fetch call
+    const response = await fetch(completionsUrl, {
       method: "POST",
       signal: controller.signal,
       headers: {
@@ -132,40 +133,50 @@ async function handler(req) {
       }),
     });
 
-    const response = await Promise.race([openRouterReq, timeoutPromise]);
-    console.log(`[chatbot][${requestId}] openrouter status=${response?.status}`);
+    console.log("STEP 6: Fetch completed");
+    console.log(`[chatbot][${requestId}] OpenRouter status: ${response?.status}`);
 
+    // Parse response
+    console.log("STEP 7: Parsing OpenRouter response");
     const data = await response
       .json()
       .catch(() => ({ error: "invalid-json" }));
 
     if (!response.ok) {
       console.error(
-        `[chatbot][${requestId}] openrouter non-200`,
+        `[chatbot][${requestId}] OpenRouter error status=${response.status}`,
         data?.error || data,
       );
       return jsonReply({ reply: FALLBACK_REPLY }, 200);
     }
 
+    // Extract reply
+    console.log("STEP 8: Extracting reply from response");
     const replyText = data?.choices?.[0]?.message?.content;
     if (typeof replyText !== "string" || !replyText.trim()) {
       console.error(
-        `[chatbot][${requestId}] missing replyText in response`,
+        `[chatbot][${requestId}] No valid reply in response`,
         data,
       );
       return jsonReply({ reply: FALLBACK_REPLY }, 200);
     }
 
     const ms = Date.now() - requestStartedAt;
-    console.log(`[chatbot][${requestId}] success ${ms}ms`);
+    console.log(`[chatbot][${requestId}] SUCCESS in ${ms}ms`);
+    console.log("STEP 9: Returning success response");
 
-    // Frontend compatibility: must be { reply: "text" }
+    // Return response with { reply } format for frontend compatibility
     return jsonReply({ reply: replyText.trim() }, 200);
   } catch (error) {
-    // Defensive: always reply quickly
-    // eslint-disable-next-line no-console
-    console.error("CHATBOT ERROR:", error);
+    console.error("CHATBOT ERROR:", error?.message || error);
+    console.log("STEP X: Error caught, returning fallback");
     return jsonReply({ reply: FALLBACK_REPLY }, 200);
+  } finally {
+    // Guarantee cleanup: clear timeout to prevent event loop hanging
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      console.log("Timeout cleared");
+    }
   }
 }
 
