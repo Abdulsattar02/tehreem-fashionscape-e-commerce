@@ -19,52 +19,48 @@ const SYSTEM_PROMPT =
   "If asked: “Who is the owner?”, “Who manages this store?”, or “Who created this brand?”, respond exactly: “Tehreem FashionScape is managed by Abdul Sattar Maher.” " +
   "If asked about products or availability, suggest browsing relevant categories/collections on the site and encourage exploring Men/Women/Kids/Shoes/Sandals naturally.";
 
-function jsonReply(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      // Vercel generally doesn't require CORS for same-origin, but keep safe.
-      "Access-Control-Allow-Origin": "*",
-    },
+function parseBody(req) {
+  return new Promise((resolve) => {
+    let data = "";
+    req.on("data", (chunk) => {
+      data += chunk;
+    });
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve(null);
+      }
+    });
   });
 }
 
-// Removed: withTimeout() - using simple AbortController instead
-
-async function readJson(req) {
-  try {
-    return await req.json();
-  } catch (e) {
-    return null;
-  }
-}
-
-async function handler(req) {
+async function handler(req, res) {
   const requestStartedAt = Date.now();
   const requestId = Math.random().toString(16).slice(2);
   let timeoutId = null;
 
   try {
+    console.log("FUNCTION STARTED");
     console.log("STEP 1: Request received");
-    console.log(`[chatbot][${requestId}] method=${req?.method}`);
+    console.log(`[chatbot][${requestId}] method=${req.method}`);
+
+    // Set CORS headers
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
 
     // Handle CORS preflight
     if (req.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
-      });
+      console.log(`[chatbot][${requestId}] OPTIONS request, returning 204`);
+      return res.status(204).end();
     }
 
     // Only POST allowed
     if (req.method !== "POST") {
       console.log(`[chatbot][${requestId}] Not POST, returning 405`);
-      return jsonReply({ reply: FALLBACK_REPLY }, 405);
+      return res.status(405).json({ reply: FALLBACK_REPLY });
     }
 
     // Validate environment variables
@@ -77,22 +73,22 @@ async function handler(req) {
       console.error(
         `[chatbot][${requestId}] Missing OPENAI_API_KEY or OPENAI_BASE_URL`,
       );
-      return jsonReply({ reply: FALLBACK_REPLY }, 500);
+      return res.status(500).json({ reply: FALLBACK_REPLY });
     }
 
     // Parse request body
     console.log("STEP 3: Parsing request body");
-    const parsedBody = await readJson(req);
+    const parsedBody = await parseBody(req);
     if (!parsedBody || typeof parsedBody !== "object") {
       console.error(`[chatbot][${requestId}] Invalid JSON body`);
-      return jsonReply({ reply: FALLBACK_REPLY }, 400);
+      return res.status(400).json({ reply: FALLBACK_REPLY });
     }
 
     const { messages, temperature } = parsedBody;
     const safeMessages = Array.isArray(messages) ? messages : [];
     if (!safeMessages.length) {
       console.error(`[chatbot][${requestId}] No messages provided`);
-      return jsonReply({ reply: FALLBACK_REPLY }, 400);
+      return res.status(400).json({ reply: FALLBACK_REPLY });
     }
 
     const tempToUse = typeof temperature === "number" ? temperature : 0.7;
@@ -107,7 +103,7 @@ async function handler(req) {
     const completionsUrl = `${envBaseUrl.replace(/\/$/, "")}/chat/completions`;
     console.log(`[chatbot][${requestId}] URL: ${completionsUrl}`);
 
-    // Simple AbortController timeout (no Promise.race)
+    // Simple timeout with AbortController
     console.log("STEP 5: Starting fetch with 10s timeout");
     const controller = new AbortController();
     const timeoutMs = 10000;
@@ -117,7 +113,8 @@ async function handler(req) {
     }, timeoutMs);
 
     // Single fetch call
-    const response = await fetch(completionsUrl, {
+    console.log(`[chatbot][${requestId}] Fetching from OpenRouter...`);
+    const fetchResponse = await fetch(completionsUrl, {
       method: "POST",
       signal: controller.signal,
       headers: {
@@ -134,20 +131,20 @@ async function handler(req) {
     });
 
     console.log("STEP 6: Fetch completed");
-    console.log(`[chatbot][${requestId}] OpenRouter status: ${response?.status}`);
+    console.log(`[chatbot][${requestId}] OpenRouter status: ${fetchResponse.status}`);
 
     // Parse response
     console.log("STEP 7: Parsing OpenRouter response");
-    const data = await response
+    const data = await fetchResponse
       .json()
       .catch(() => ({ error: "invalid-json" }));
 
-    if (!response.ok) {
+    if (!fetchResponse.ok) {
       console.error(
-        `[chatbot][${requestId}] OpenRouter error status=${response.status}`,
+        `[chatbot][${requestId}] OpenRouter error status=${fetchResponse.status}`,
         data?.error || data,
       );
-      return jsonReply({ reply: FALLBACK_REPLY }, 200);
+      return res.status(200).json({ reply: FALLBACK_REPLY });
     }
 
     // Extract reply
@@ -158,7 +155,7 @@ async function handler(req) {
         `[chatbot][${requestId}] No valid reply in response`,
         data,
       );
-      return jsonReply({ reply: FALLBACK_REPLY }, 200);
+      return res.status(200).json({ reply: FALLBACK_REPLY });
     }
 
     const ms = Date.now() - requestStartedAt;
@@ -166,11 +163,11 @@ async function handler(req) {
     console.log("STEP 9: Returning success response");
 
     // Return response with { reply } format for frontend compatibility
-    return jsonReply({ reply: replyText.trim() }, 200);
+    return res.status(200).json({ reply: replyText.trim() });
   } catch (error) {
     console.error("CHATBOT ERROR:", error?.message || error);
     console.log("STEP X: Error caught, returning fallback");
-    return jsonReply({ reply: FALLBACK_REPLY }, 200);
+    return res.status(200).json({ reply: FALLBACK_REPLY });
   } finally {
     // Guarantee cleanup: clear timeout to prevent event loop hanging
     if (timeoutId !== null) {
